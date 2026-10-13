@@ -398,8 +398,11 @@ function saveSummary() {
 // ================= RENDER: one job =================
 // Escape special characters so user-typed text can't break the HTML (or inject code)
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-// Format a timestamp as a short date like "Oct 12"
+// Format a timestamp as a short date like "Oct 12". NOTE: no longer used since the Done badge now uses fmtDateTime() below. Safe to delete.
 const fmt = iso => { try { return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }); } catch (e) { return ""; } };
+// ADDED: formats a timestamp as date + time of day, like "Oct 12, 3:45 PM" (uses the phone's own time zone and 12/24-hour setting).
+// doneAt already stores the full date AND time, so the checkbox handler didn't need to change. Only the display did.
+const fmtDateTime = iso => { try { return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } };
 // Format a "YYYY-MM-DD" date as "Oct 12, 2026" (parsed manually to avoid time zone shifts)
 const fmtDay = d => { if (!d) return ""; const [y, m, dd] = d.split("-").map(Number); try { return new Date(y, m - 1, dd).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); } catch (e) { return d; } };
 // Build <option> tags for the trade dropdowns, with the selected one marked. If an item uses a trade that was later deleted, it's still included so it doesn't vanish.
@@ -431,11 +434,12 @@ function render() {
     // Build the list items for this room
     const lis = vis.map(it => {
       const r = rec(it.id), ed = ui.edit === it.id; // ed = is this item currently being edited?
+      // CHANGED: the green "✓ Done" badge below now uses fmtDateTime() so it shows the time of day, not just the date
       return `<li class="item ${r.done ? "done" : ""}" data-id="${it.id}">
         <input type="checkbox" id="cb-${it.id}" ${r.done ? "checked" : ""} aria-label="${esc(it.text)}">
         <div class="it-main"><label for="cb-${it.id}"><span class="txt">${esc(it.text)}</span></label>
           ${r.note && !ed ? `<div class="note">${esc(r.note)}</div>` : ""}
-          <div class="meta"><span class="trade">${esc(it.trade)}</span>${r.done ? `<span class="badge-done">✓ Done${r.doneAt ? " " + fmt(r.doneAt) : ""}</span>` : ""}
+          <div class="meta"><span class="trade">${esc(it.trade)}</span>${r.done ? `<span class="badge-done">✓ Done${r.doneAt ? " " + fmtDateTime(r.doneAt) : ""}</span>` : ""}
             ${ed ? "" : `<button type="button" class="link" data-edit="${it.id}">Edit</button>`}
             ${ed ? "" : `<button type="button" class="link muted" data-delitem="${it.id}">Remove</button>`}</div></div>
         ${ed ? `<div class="edit"><input type="text" id="text-${it.id}" maxlength="160" value="${esc(it.text)}" aria-label="Item text"><textarea id="note-${it.id}" placeholder="What's wrong, where exactly, who's fixing it…" aria-label="Note">${esc(r.note || "")}</textarea>
