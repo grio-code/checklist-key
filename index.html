@@ -153,6 +153,7 @@ li.item { display: grid; grid-template-columns: 32px 1fr; gap: 6px 12px; padding
   .jobinfo { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } /* two columns instead of three */
   .jobinfo .w2 { grid-column: 1 / -1; } /* wide fields take the full row */
   .jobinfo .w2 { order: 2; }            /* and move below Date and Lot */
+  .jobinfo .full { order: 3; }          /* ADDED: the Folder dropdown goes last on phones */
   .add { grid-template-columns: 1fr 1fr; }
   .add input { grid-column: 1 / 3; }    /* item text gets its own full-width row */
   .addroom { grid-template-columns: 1fr auto; }
@@ -181,6 +182,12 @@ ul.jobs a:hover { border-color: var(--muted); }
 #tradeList .x, #floorList .x { font-size: 18px; padding: 0 2px; color: var(--chip-ink); }
 .item.done { box-shadow: inset 4px 0 0 var(--done); } /* green stripe on the left of completed items */
 .item.done .txt { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--muted); } /* strikethrough for completed items (this one wins over the earlier rule) */
+/* ADDED: styles for the folders feature */
+.ficon { flex: none; color: var(--muted); } /* little folder icon on a folder's header row */
+.jobinfo .full { grid-column: 1 / -1; } /* the Folder dropdown takes the whole row */
+.jobinfo select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sheet); font-size: 16px; } /* Folder dropdown, styled like the other job info fields */
+#addFolderForm { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 12px; } /* "New folder" name box + Create button */
+#addFolderForm input { width: 100%; padding: 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sheet); font-size: 16px; }
 .badge-done { font-family: var(--f-mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--sheet); background: var(--done); padding: 2px 7px; border-radius: 3px; } /* green "✓ Done Oct 12" badge */
 </style>
 </head>
@@ -196,8 +203,15 @@ ul.jobs a:hover { border-color: var(--muted); }
     <div class="banner" id="offlineBanner" hidden>Shared saving isn't set up yet, so lists are saved on this phone only. Add your Firebase settings to <b>firebase-config.js</b> to share them.</div>
     <div class="tools" style="margin-top:16px">
       <button type="button" class="btn primary" id="newJob">New list</button>
+      <!-- ADDED: button that shows/hides the "create a folder" form below -->
+      <button type="button" class="btn" id="newFolder">New folder</button>
       <span class="saved" id="jobsSaved"></span>
     </div>
+    <!-- ADDED: form for naming a new folder. Hidden until "New folder" is tapped. -->
+    <form id="addFolderForm" hidden>
+      <input id="newFolderName" type="text" maxlength="40" placeholder="Folder name" aria-label="New folder name">
+      <button class="btn primary" type="submit">Create</button>
+    </form>
     <!-- Filled in by renderJobs() -->
     <ul class="jobs" id="jobs"></ul>
     <!-- Dismissible tip for installing the app on an iPhone home screen -->
@@ -227,6 +241,8 @@ ul.jobs a:hover { border-color: var(--muted); }
       <div class="f w2"><label for="jCommunity">Community</label><input id="jCommunity" type="text" maxlength="60" data-meta="community" placeholder="Community name"></div>
       <div class="f w2"><label for="jAddress">Address</label><input id="jAddress" type="text" maxlength="100" data-meta="address" placeholder="Street address"></div>
       <div class="f"><label for="jLot">Lot #</label><input id="jLot" type="text" maxlength="20" data-meta="lot" placeholder="Lot"></div>
+      <!-- ADDED: choose which folder this list lives in. Options are filled in by applyFolders(). It has no data-meta attribute because it saves through its own change listener. -->
+      <div class="f full"><label for="jFolder">Folder</label><select id="jFolder" aria-label="Folder"></select></div>
     </div>
     <!-- Sticky header: progress bar, filters, and toolbar -->
     <header class="top">
@@ -325,14 +341,20 @@ function blank() { return { items: {}, custom: {}, rooms: {}, hidden: {}, meta: 
 // ui = temporary screen state that isn't saved to the database
 //   show: status filter, trade: trade filter, open: which rooms are expanded,
 //   edit: id of the item being edited, confirm: room awaiting remove-confirmation, editRoom: room being renamed
-const ui = { show: "all", trade: "", open: {}, edit: null, confirm: null, editRoom: null };
+// ADDED to ui for folders: openFolders = which folders are expanded, renameFolder = folder being renamed, confirmFolder = folder awaiting delete-confirmation
+const ui = { show: "all", trade: "", open: {}, edit: null, confirm: null, editRoom: null, openFolders: {}, renameFolder: null, confirmFolder: null };
 let jobsList = {};     // all jobs, for the home screen
+// ADDED: all folders, as { folderId: { name, createdAt } }. Folders are stored inside the same "settings/app" record as trades and levels
+// (so no new Firebase permissions are needed). Each list remembers its folder with a folderId field on the list's own record.
+let foldersList = {};
+// ADDED: folders as [id, folder] pairs sorted A to Z by name
+const sortedFolders = () => Object.entries(foldersList).sort((a, b) => (a[1].name || "").localeCompare(b[1].name || "", undefined, { sensitivity: "base" }));
 let unsubs = [];       // functions that stop live Firestore listeners
 
 // Read saved UI preferences (which rooms were open, whether the tip was hidden)
 function uiPrefs() { try { return JSON.parse(localStorage.getItem(LS + "-ui") || "{}"); } catch (e) { return {}; } }
 // Save those preferences, remembering expanded rooms separately for each job
-function uiSave() { try { const p = uiPrefs(); p.open = p.open || {}; if (jobId) p.open[jobId] = ui.open; p.tipHidden = document.getElementById("tip").hidden; localStorage.setItem(LS + "-ui", JSON.stringify(p)); } catch (e) {} }
+function uiSave() { try { const p = uiPrefs(); p.open = p.open || {}; if (jobId) p.open[jobId] = ui.open; p.openFolders = ui.openFolders; /* ADDED: remember which folders were expanded */ p.tipHidden = document.getElementById("tip").hidden; localStorage.setItem(LS + "-ui", JSON.stringify(p)); } catch (e) {} }
 
 // Build the full list of rooms to show: default rooms (minus hidden ones, with any renames applied) followed by user-added rooms in creation order
 function allRooms() {
@@ -496,6 +518,9 @@ function render() {
   if (focusId) { const el = document.getElementById(focusId); if (el) el.focus({ preventScroll: true }); }
   // Fill the job detail inputs (skipping the one being typed in so it doesn't get overwritten)
   document.querySelectorAll("[data-meta]").forEach(el => { if (document.activeElement !== el) el.value = state.meta[el.dataset.meta] || ""; });
+  // ADDED: show this list's current folder in the Folder dropdown ("No folder" if it has none, or its folder was deleted)
+  const fsel = document.getElementById("jFolder");
+  if (document.activeElement !== fsel) fsel.value = foldersList[state.meta.folderId] ? state.meta.folderId : "";
   // Browser tab title becomes "Lot 12 · Community Name"
   document.title = [state.meta.lot && "Lot " + state.meta.lot, state.meta.community].filter(Boolean).join(" · ") || "Punch List";
   updateTitle(); // ADDED: refresh the heading whenever the screen redraws
@@ -522,15 +547,51 @@ function listText() {
 }
 
 // ================= RENDER: jobs list (home screen) =================
+// CHANGED: split into two functions. jobRow() builds the HTML for ONE list (this is the old per-list code, unchanged),
+// and renderJobs() now arranges the folders and the lists around them.
+function jobRow(id, j) {
+  const title = [j.lot && "Lot " + j.lot, j.community].filter(Boolean).join(" · ") || "Untitled punch list";
+  const sub = [j.address, j.date && fmtDay(j.date)].filter(Boolean).join(" · ");
+  const pill = typeof j.openCount === "number" && j.totalCount ? (j.openCount ? `<span class="pill">${j.openCount} open</span>` : `<span class="pill clear">Clear</span>`) : `<span class="pill none">No items</span>`;
+  return `<li><a href="?job=${encodeURIComponent(id)}" data-job="${esc(id)}"><span class="j-main"><span class="j-title">${esc(title)}</span>${sub ? `<span class="j-sub">${esc(sub)}</span>` : ""}</span>${pill}</a></li>`;
+}
 function renderJobs() {
   // Newest first
   const rows = Object.entries(jobsList).sort((a, b) => (b[1].createdAt || "").localeCompare(a[1].createdAt || ""));
-  document.getElementById("jobs").innerHTML = rows.length ? rows.map(([id, j]) => {
-    const title = [j.lot && "Lot " + j.lot, j.community].filter(Boolean).join(" · ") || "Untitled punch list";
-    const sub = [j.address, j.date && fmtDay(j.date)].filter(Boolean).join(" · ");
-    const pill = typeof j.openCount === "number" && j.totalCount ? (j.openCount ? `<span class="pill">${j.openCount} open</span>` : `<span class="pill clear">Clear</span>`) : `<span class="pill none">No items</span>`;
-    return `<li><a href="?job=${encodeURIComponent(id)}" data-job="${esc(id)}"><span class="j-main"><span class="j-title">${esc(title)}</span>${sub ? `<span class="j-sub">${esc(sub)}</span>` : ""}</span>${pill}</a></li>`;
-  }).join("") : `<li class="empty">No punch lists yet. Tap <b>New punch list</b> to start one.</li>`;
+  // ADDED: remember what was typed in a folder rename box and which field had focus, because the whole list is rebuilt below
+  const focusId = document.activeElement && document.activeElement.id;
+  const keep = {};
+  document.querySelectorAll("#jobs input").forEach(el => keep[el.id] = el.value);
+  let html = "";
+  // ADDED: one expandable card per folder (same look as the room cards), folders sorted A to Z
+  sortedFolders().forEach(([fid, fo]) => {
+    const inside = rows.filter(([, j]) => j.folderId === fid); // the lists that belong to this folder
+    const n = inside.length;
+    const isOpen = !!ui.openFolders[fid];
+    html += `<li><section class="room ${isOpen ? "open" : ""}">
+      <button type="button" class="room-head" data-ftoggle="${esc(fid)}" aria-expanded="${isOpen}">
+        <svg class="ficon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+        <span class="room-name">${esc(fo.name)}</span>
+        <span class="pill none">${n} ${n === 1 ? "list" : "lists"}</span>
+        <svg class="chev" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+      ${isOpen ? `<div class="room-body">
+        ${ui.renameFolder === fid ? `<div class="edit" style="padding:12px 14px"><input type="text" id="fname-${esc(fid)}" maxlength="40" value="${esc(fo.name)}" aria-label="Folder name"><div class="acts"><button type="button" class="btn" data-fcancel>Cancel</button><button type="button" class="btn primary" data-fsave="${esc(fid)}">Save</button></div></div>` : ""}
+        <ul class="jobs" style="margin:0;padding:12px 14px">${n ? inside.map(([id, j]) => jobRow(id, j)).join("") : `<li class="empty" style="padding:0">No lists in this folder yet.</li>`}</ul>
+        ${ui.confirmFolder === fid ? `<div class="confirm">Delete the folder ${esc(fo.name)}? The lists inside are not deleted. They move back to the main list.
+            <div class="acts"><button type="button" class="btn" data-fcancel>Keep it</button><button type="button" class="btn danger" data-fdel="${esc(fid)}">Delete folder</button></div></div>`
+          : `<div class="room-foot" style="gap:16px"><button type="button" class="link" data-fnew="${esc(fid)}">New list here</button><button type="button" class="link" data-frename="${esc(fid)}">Rename</button><button type="button" class="link muted" data-fask="${esc(fid)}">Delete folder</button></div>`}
+      </div>` : ""}
+    </section></li>`;
+  });
+  // ADDED: lists that are not in any folder (or whose folder was deleted) show below the folders
+  const loose = rows.filter(([, j]) => !j.folderId || !foldersList[j.folderId]);
+  if (sortedFolders().length && loose.length) html += `<li><h2 class="floor">Not in a folder</h2></li>`;
+  html += loose.map(([id, j]) => jobRow(id, j)).join("");
+  document.getElementById("jobs").innerHTML = html || `<li class="empty">No punch lists yet. Tap <b>New punch list</b> to start one.</li>`;
+  // ADDED: put back anything that was being typed, and the focus
+  Object.entries(keep).forEach(([k, v]) => { const el = document.getElementById(k); if (el) el.value = v; });
+  if (focusId) { const el = document.getElementById(focusId); if (el) el.focus({ preventScroll: true }); }
 }
 
 // ================= NAVIGATION =================
@@ -595,7 +656,8 @@ window.addEventListener("popstate", route);
 
 // ================= TRADES AND LEVELS (shared, editable) =================
 // Save the trades and levels lists (to Firestore if connected, otherwise localStorage)
-function saveSettings() { if (fs) fs.doc("settings/app").set({ trades: TRADES, floors: FLOORS }).catch(() => toast("Couldn't save.")); else { local.trades = TRADES; local.floors = FLOORS; lsSave(); } }
+// CHANGED: now saves foldersList too (it lives in the same record as trades and levels)
+function saveSettings() { if (fs) fs.doc("settings/app").set({ trades: TRADES, floors: FLOORS, folders: foldersList }).catch(() => toast("Couldn't save.")); else { local.trades = TRADES; local.floors = FLOORS; local.folders = foldersList; lsSave(); } }
 // Refresh every dropdown and tag list that depends on trades/levels, then redraw
 function applyTrades() {
   const tf = document.getElementById("tradeF"), cur = ui.trade;
@@ -605,14 +667,22 @@ function applyTrades() {
   nf.innerHTML = FLOORS.map(f => `<option>${esc(f)}</option>`).join("");
   if (FLOORS.includes(cf)) nf.value = cf; else nf.selectedIndex = FLOORS.length > 1 ? 1 : 0; // keep the previous choice, otherwise default to the second level
   document.getElementById("floorList").innerHTML = FLOORS.map((f, i) => `<span class="trade">${esc(f)} <button type="button" class="x" data-delfloor="${i}" aria-label="Remove ${esc(f)}">×</button></span>`).join("");
+  applyFolders(); // ADDED: refresh folder-related screens whenever settings are applied (this also runs when the shared settings load)
   render();
+}
+// ADDED: refresh everything that shows folders: the Folder dropdown on a list, and the home screen
+function applyFolders() {
+  const sel = document.getElementById("jFolder");
+  sel.innerHTML = `<option value="">No folder</option>` + sortedFolders().map(([id, f]) => `<option value="${esc(id)}">${esc(f.name)}</option>`).join("");
+  sel.value = foldersList[state.meta.folderId] ? state.meta.folderId : "";
+  renderJobs();
 }
 
 // ================= EVENTS =================
 applyTrades(); // initial fill of the dropdowns
 // Load trades/levels: live from Firestore if connected, otherwise from localStorage
-if (fs) fs.doc("settings/app").onSnapshot(snap => { const d = snap.exists ? snap.data() : {}; TRADES = Array.isArray(d.trades) && d.trades.length ? d.trades : DEFAULT_TRADES.slice(); FLOORS = Array.isArray(d.floors) && d.floors.length ? d.floors : DEFAULT_FLOORS.slice(); applyTrades(); }, () => {});
-else { if (Array.isArray(local.trades) && local.trades.length) TRADES = local.trades; if (Array.isArray(local.floors) && local.floors.length) FLOORS = local.floors; applyTrades(); }
+if (fs) fs.doc("settings/app").onSnapshot(snap => { const d = snap.exists ? snap.data() : {}; TRADES = Array.isArray(d.trades) && d.trades.length ? d.trades : DEFAULT_TRADES.slice(); FLOORS = Array.isArray(d.floors) && d.floors.length ? d.floors : DEFAULT_FLOORS.slice(); foldersList = d.folders && typeof d.folders === "object" ? d.folders : {} /* ADDED: load folders */; applyTrades(); }, () => {});
+else { if (Array.isArray(local.trades) && local.trades.length) TRADES = local.trades; if (Array.isArray(local.floors) && local.floors.length) FLOORS = local.floors; foldersList = local.folders || {}; /* ADDED: load folders saved on this phone */ applyTrades(); }
 // Click the × on a level tag to remove it (at least one must remain)
 document.getElementById("floorList").addEventListener("click", e => { const b = e.target.closest("[data-delfloor]"); if (!b) return; if (FLOORS.length < 2) { toast("Keep at least one list"); return; } FLOORS.splice(+b.dataset.delfloor, 1); saveSettings(); applyTrades(); });
 // "Edit levels & trades" button toggles the editor panel
@@ -624,23 +694,64 @@ document.getElementById("showF").addEventListener("change", e => { ui.show = e.t
 document.getElementById("tradeF").addEventListener("change", e => { ui.trade = e.target.value; render(); });
 // Typing in any job detail field updates state, updates the heading right away (CHANGED: updateTitle() added), and triggers a debounced save
 document.querySelectorAll("[data-meta]").forEach(el => el.addEventListener("input", () => { state.meta = Object.assign({}, state.meta, { [el.dataset.meta]: el.value }); updateTitle(); saveMeta(); }));
+// ADDED: choosing a folder in the dropdown moves this list into that folder (empty value = no folder)
+document.getElementById("jFolder").addEventListener("change", e => {
+  state.meta = Object.assign({}, state.meta, { folderId: e.target.value });
+  if (e.target.value) { ui.openFolders[e.target.value] = true; uiSave(); } // open that folder so the list is easy to find on the home screen
+  if (!fs) { saveLocalJob(); flag("Saved on this phone"); return; }
+  fs.doc("jobs/" + jobId).set({ folderId: e.target.value }, { merge: true }).then(() => flag("Saved"), () => flag("Couldn't save. Check your connection."));
+});
 // Dismiss the install tip and remember that choice
 document.getElementById("tipX").addEventListener("click", () => { document.getElementById("tip").hidden = true; uiSave(); });
 document.getElementById("backBtn").addEventListener("click", () => go(null));
-// "New punch list": creates a job with a random id and today's date, then opens it
-document.getElementById("newJob").addEventListener("click", async () => {
+// CHANGED: the "New list" code now lives in a function so it can be used from two places: the main "New list" button
+// (no folder) and the "New list here" link inside a folder. Creates a list with a random id and today's date, then opens it.
+function createJob(folderId) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const today = new Date(); const d = today.getFullYear() + "-" + String(today.getMonth() + 1).padStart(2, "0") + "-" + String(today.getDate()).padStart(2, "0");
-  const meta = { date: d, community: "", address: "", lot: "", createdAt: new Date().toISOString() };
+  const meta = { date: d, community: "", address: "", lot: "", folderId: folderId || "", createdAt: new Date().toISOString() }; // ADDED: folderId
   if (fs) { fs.doc("jobs/" + id).set(meta).catch(() => toast("Couldn't create the list. Check your connection.")); }
   else { local.jobs[id] = Object.assign(blank(), { meta }); lsSave(); }
+  if (folderId) { ui.openFolders[folderId] = true; uiSave(); } // keep the folder open so the new list is visible when you come back
   go(id);
   setTimeout(() => document.getElementById("jCommunity").focus(), 50); // jump straight to the Community field
+}
+document.getElementById("newJob").addEventListener("click", () => createJob(""));
+// ADDED: "New folder" button shows or hides the name form
+document.getElementById("newFolder").addEventListener("click", () => {
+  const f = document.getElementById("addFolderForm");
+  f.hidden = !f.hidden;
+  if (!f.hidden) document.getElementById("newFolderName").focus();
 });
-// Clicking a job on the home screen opens it without a full page reload
+// CHANGED: this one click handler on the home screen list used to only open a list. It now also handles the folder buttons,
+// using the same data- attribute approach as the room buttons (the buttons are re-created every time the list redraws).
 document.getElementById("jobs").addEventListener("click", e => {
-  const a = e.target.closest("a[data-job]"); if (!a) return;
-  e.preventDefault(); go(a.dataset.job);
+  // Clicking a list opens it without a full page reload (unchanged)
+  const a = e.target.closest("a[data-job]");
+  if (a) { e.preventDefault(); go(a.dataset.job); return; }
+  const b = e.target.closest("button"); if (!b) return;
+  const d = b.dataset;
+  // Expand / collapse a folder
+  if (d.ftoggle) { ui.openFolders[d.ftoggle] = !ui.openFolders[d.ftoggle]; ui.confirmFolder = null; uiSave(); renderJobs(); }
+  // Create a list inside this folder
+  else if (d.fnew) { createJob(d.fnew); }
+  // Start renaming a folder
+  else if (d.frename) { ui.renameFolder = d.frename; ui.confirmFolder = null; renderJobs(); document.getElementById("fname-" + d.frename)?.focus(); }
+  // Save the new folder name (ignored if empty)
+  else if (d.fsave) {
+    const id = d.fsave, name = document.getElementById("fname-" + id).value.trim();
+    if (name) { foldersList = Object.assign({}, foldersList, { [id]: Object.assign({}, foldersList[id], { name }) }); saveSettings(); }
+    ui.renameFolder = null; applyFolders();
+  }
+  // Cancel a rename or a delete confirmation
+  else if (b.hasAttribute("data-fcancel")) { ui.renameFolder = null; ui.confirmFolder = null; renderJobs(); }
+  // Ask "delete this folder?"
+  else if (d.fask) { ui.confirmFolder = d.fask; ui.renameFolder = null; renderJobs(); }
+  // Confirm: remove the folder. The lists inside are NOT deleted. They still point at the old folder id, which no longer exists, so they show up under "Not in a folder".
+  else if (d.fdel) {
+    const rest = Object.assign({}, foldersList); delete rest[d.fdel]; foldersList = rest;
+    ui.confirmFolder = null; saveSettings(); applyFolders(); toast("Folder deleted");
+  }
 });
 // Copy text to the clipboard; if that's not allowed, show the text in a box so it can be selected and copied by hand
 function copyOut(text, okMsg) {
@@ -740,6 +851,18 @@ document.addEventListener("submit", e => {
     document.getElementById("add-" + id)?.focus(); // jump into the new room's "New Item" field
     return;
   }
+  // ADDED: create a new folder (ignores empty names and duplicates, case-insensitive)
+  if (f.id === "addFolderForm") {
+    const inp = document.getElementById("newFolderName"), name = inp.value.trim();
+    if (!name) return;
+    if (Object.values(foldersList).some(x => (x.name || "").toLowerCase() === name.toLowerCase())) { toast("You already have a folder with that name"); return; }
+    const id = "f-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    foldersList = Object.assign({}, foldersList, { [id]: { name, createdAt: new Date().toISOString() } });
+    ui.openFolders[id] = true; uiSave(); // start the new folder expanded
+    inp.value = ""; f.hidden = true;
+    saveSettings(); applyFolders();
+    return;
+  }
   // Add a level (ignores duplicates, case-insensitive)
   if (f.id === "addFloor") { const inp = document.getElementById("newFloor"), t = inp.value.trim(); if (t && !FLOORS.some(x => x.toLowerCase() === t.toLowerCase())) { FLOORS.push(t); saveSettings(); applyTrades(); } inp.value = ""; return; }
   // Add a trade (ignores duplicates, case-insensitive)
@@ -757,6 +880,7 @@ document.addEventListener("submit", e => {
 // ================= BOOT (runs once when the page loads) =================
 // Hide the install tip if it was dismissed before, or if the app is already running from the home screen
 if (uiPrefs().tipHidden || navigator.standalone) document.getElementById("tip").hidden = true;
+ui.openFolders = uiPrefs().openFolders || {}; // ADDED: restore which folders were expanded last time
 route(); // show the right screen for the current URL
 </script>
 </body>
