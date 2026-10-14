@@ -188,6 +188,12 @@ ul.jobs a:hover { border-color: var(--muted); }
 .jobinfo select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sheet); font-size: 16px; } /* Folder dropdown, styled like the other job info fields */
 #addFolderForm { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 12px; } /* "New folder" name box + Create button */
 #addFolderForm input { width: 100%; padding: 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sheet); font-size: 16px; }
+/* ADDED: styles for dragging a list into a folder */
+ul.jobs a { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; } /* no text selection or link preview popup when you press and hold a list */
+.drag-ghost { position: fixed; left: 0; top: 0; margin: 0 !important; z-index: 30; pointer-events: none; opacity: .92; filter: drop-shadow(0 8px 16px rgba(0,0,0,.3)); } /* the floating copy of the list that follows your finger */
+.is-dragging-source { opacity: .35; } /* the original list row fades while you drag it */
+.drop-hover { outline: 3px solid var(--accent); outline-offset: -3px; } /* highlights the folder (or drop area) under your finger */
+.dropzone { border: 2px dashed var(--muted); border-radius: 8px; padding: 16px; text-align: center; color: var(--muted); font-size: 14px; list-style: none; } /* "drop here to take it out of its folder" area */
 .badge-done { font-family: var(--f-mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--sheet); background: var(--done); padding: 2px 7px; border-radius: 3px; } /* green "✓ Done Oct 12" badge */
 </style>
 </head>
@@ -212,6 +218,8 @@ ul.jobs a:hover { border-color: var(--muted); }
       <input id="newFolderName" type="text" maxlength="40" placeholder="Folder name" aria-label="New folder name">
       <button class="btn primary" type="submit">Create</button>
     </form>
+    <!-- ADDED: small tip about dragging. Shown by renderJobs() only when there is at least one folder and one list. -->
+    <p class="when" id="dragHint" style="margin:12px 0 0" hidden>Tip: press and hold a list, then drag it onto a folder.</p>
     <!-- Filled in by renderJobs() -->
     <ul class="jobs" id="jobs"></ul>
     <!-- Dismissible tip for installing the app on an iPhone home screen -->
@@ -347,6 +355,10 @@ let jobsList = {};     // all jobs, for the home screen
 // ADDED: all folders, as { folderId: { name, createdAt } }. Folders are stored inside the same "settings/app" record as trades and levels
 // (so no new Firebase permissions are needed). Each list remembers its folder with a folderId field on the list's own record.
 let foldersList = {};
+// ADDED: state of a list being dragged into a folder (declared here, not down in the drag section, because renderJobs() checks it during startup). See DRAG A LIST INTO A FOLDER below.
+// drag = everything about the drag in progress: which list, the floating copy ("ghost"), where the pointer is, and what it is hovering over.
+const drag = { id: null, el: null, ghost: null, timer: null, active: false, type: "", startX: 0, startY: 0, lastX: 0, lastY: 0, offX: 0, offY: 0, target: null, rerender: false, raf: 0 };
+let dragEndedAt = 0; // when the last drag ended, used to ignore the click that browsers fire after a drag
 // ADDED: folders as [id, folder] pairs sorted A to Z by name
 const sortedFolders = () => Object.entries(foldersList).sort((a, b) => (a[1].name || "").localeCompare(b[1].name || "", undefined, { sensitivity: "base" }));
 let unsubs = [];       // functions that stop live Firestore listeners
@@ -553,9 +565,11 @@ function jobRow(id, j) {
   const title = [j.lot && "Lot " + j.lot, j.community].filter(Boolean).join(" · ") || "Untitled punch list";
   const sub = [j.address, j.date && fmtDay(j.date)].filter(Boolean).join(" · ");
   const pill = typeof j.openCount === "number" && j.totalCount ? (j.openCount ? `<span class="pill">${j.openCount} open</span>` : `<span class="pill clear">Clear</span>`) : `<span class="pill none">No items</span>`;
-  return `<li><a href="?job=${encodeURIComponent(id)}" data-job="${esc(id)}"><span class="j-main"><span class="j-title">${esc(title)}</span>${sub ? `<span class="j-sub">${esc(sub)}</span>` : ""}</span>${pill}</a></li>`;
+  return `<li><a href="?job=${encodeURIComponent(id)}" data-job="${esc(id)}" draggable="false"><span class="j-main"><span class="j-title">${esc(title)}</span>${sub ? `<span class="j-sub">${esc(sub)}</span>` : ""}</span>${pill}</a></li>`;
 }
 function renderJobs() {
+  // ADDED: don't redraw the list while a list is being dragged (the floating copy and highlights would be wiped). It redraws when the drag ends.
+  if (drag.active) { drag.rerender = true; return; }
   // Newest first
   const rows = Object.entries(jobsList).sort((a, b) => (b[1].createdAt || "").localeCompare(a[1].createdAt || ""));
   // ADDED: remember what was typed in a folder rename box and which field had focus, because the whole list is rebuilt below
@@ -568,7 +582,7 @@ function renderJobs() {
     const inside = rows.filter(([, j]) => j.folderId === fid); // the lists that belong to this folder
     const n = inside.length;
     const isOpen = !!ui.openFolders[fid];
-    html += `<li><section class="room ${isOpen ? "open" : ""}">
+    html += `<li><section class="room ${isOpen ? "open" : ""}" data-dropfolder="${esc(fid)}">
       <button type="button" class="room-head" data-ftoggle="${esc(fid)}" aria-expanded="${isOpen}">
         <svg class="ficon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2"/></svg>
         <span class="room-name">${esc(fo.name)}</span>
@@ -586,9 +600,10 @@ function renderJobs() {
   });
   // ADDED: lists that are not in any folder (or whose folder was deleted) show below the folders
   const loose = rows.filter(([, j]) => !j.folderId || !foldersList[j.folderId]);
-  if (sortedFolders().length && loose.length) html += `<li><h2 class="floor">Not in a folder</h2></li>`;
+  if (sortedFolders().length && loose.length) html += `<li data-dropfolder=""><h2 class="floor">Not in a folder</h2></li>`;
   html += loose.map(([id, j]) => jobRow(id, j)).join("");
   document.getElementById("jobs").innerHTML = html || `<li class="empty">No punch lists yet. Tap <b>New punch list</b> to start one.</li>`;
+  document.getElementById("dragHint").hidden = !(sortedFolders().length && rows.length); // ADDED: show the drag tip only when it's useful
   // ADDED: put back anything that was being typed, and the focus
   Object.entries(keep).forEach(([k, v]) => { const el = document.getElementById(k); if (el) el.value = v; });
   if (focusId) { const el = document.getElementById(focusId); if (el) el.focus({ preventScroll: true }); }
@@ -753,6 +768,96 @@ document.getElementById("jobs").addEventListener("click", e => {
     ui.confirmFolder = null; saveSettings(); applyFolders(); toast("Folder deleted");
   }
 });
+// ================= DRAG A LIST INTO A FOLDER (ADDED) =================
+// Works with a mouse (click and drag) and on a phone (press and hold ~0.35 seconds, then drag). It uses "pointer events" instead of the browser's
+// built-in drag and drop, because the built-in version doesn't work with a finger on an iPhone.
+const jobsEl = document.getElementById("jobs");
+
+// Move a list into a folder (folderId = "" means take it out of any folder) and save it
+function setJobFolder(id, folderId) {
+  const cur = jobsList[id] && foldersList[jobsList[id].folderId] ? jobsList[id].folderId : "";
+  if (cur === folderId || (folderId && !foldersList[folderId])) return; // already there, or the folder doesn't exist
+  jobsList[id] = Object.assign({}, jobsList[id], { folderId }); // update the screen right away
+  if (fs) fs.doc("jobs/" + id).set({ folderId }, { merge: true }).catch(() => toast("Couldn't move the list. Check your connection."));
+  else if (local.jobs[id]) { local.jobs[id].meta = Object.assign({}, local.jobs[id].meta, { folderId }); lsSave(); }
+  if (folderId) { ui.openFolders[folderId] = true; uiSave(); } // open the folder so you can see it landed
+  toast(folderId ? "Moved to " + foldersList[folderId].name : "Taken out of its folder");
+}
+
+// Begin dragging: make the floating copy, fade the original, and (if the list is in a folder) add a drop area for taking it back out
+function startDrag() {
+  const li = drag.el && drag.el.closest("li");
+  if (!li) { finishDrag(false); return; }
+  clearTimeout(drag.timer);
+  drag.active = true;
+  const r = li.getBoundingClientRect();
+  drag.offX = drag.startX - r.left; drag.offY = drag.startY - r.top; // keep the grab point under the finger
+  drag.ghost = document.createElement("ul"); drag.ghost.className = "jobs drag-ghost"; drag.ghost.style.width = r.width + "px";
+  drag.ghost.appendChild(li.cloneNode(true));
+  document.body.appendChild(drag.ghost);
+  li.classList.add("is-dragging-source");
+  const j = jobsList[drag.id];
+  if (j && foldersList[j.folderId]) {
+    const dz = document.createElement("li"); dz.className = "dropzone"; dz.dataset.dropfolder = ""; dz.textContent = "Drop here to take it out of its folder";
+    jobsEl.appendChild(dz);
+  }
+  if (navigator.vibrate) navigator.vibrate(15); // small buzz on phones that support it
+  tick();
+}
+// Runs every frame while dragging: scrolls the page when you're near the top or bottom edge, moves the floating copy, and highlights the folder underneath
+function tick() {
+  if (!drag.active) return;
+  const edge = 80, y = drag.lastY;
+  if (y < edge) window.scrollBy(0, -Math.ceil((edge - y) / 6));
+  else if (y > window.innerHeight - edge) window.scrollBy(0, Math.ceil((y - (window.innerHeight - edge)) / 6));
+  drag.ghost.style.transform = `translate(${drag.lastX - drag.offX}px, ${drag.lastY - drag.offY}px)`;
+  const under = document.elementFromPoint(drag.lastX, drag.lastY); // the floating copy ignores the pointer, so this sees what's beneath it
+  const target = under ? under.closest("[data-dropfolder]") : null;
+  if (target !== drag.target) { if (drag.target) drag.target.classList.remove("drop-hover"); if (target) target.classList.add("drop-hover"); drag.target = target; }
+  drag.raf = requestAnimationFrame(tick);
+}
+// End the drag. drop = true means the pointer was released (drop it), false means cancelled (put it back).
+function finishDrag(drop) {
+  clearTimeout(drag.timer); cancelAnimationFrame(drag.raf);
+  const wasActive = drag.active, target = drag.target;
+  if (wasActive) {
+    if (drag.ghost) drag.ghost.remove();
+    drag.ghost = null; drag.active = false; dragEndedAt = Date.now();
+    jobsEl.querySelectorAll(".is-dragging-source").forEach(el => el.classList.remove("is-dragging-source"));
+    jobsEl.querySelectorAll(".drop-hover").forEach(el => el.classList.remove("drop-hover"));
+    const dz = jobsEl.querySelector(".dropzone"); if (dz) dz.remove();
+    if (drop && target) setJobFolder(drag.id, target.dataset.dropfolder);
+  }
+  const redraw = wasActive || drag.rerender;
+  drag.id = null; drag.el = null; drag.target = null; drag.rerender = false;
+  if (redraw) renderJobs();
+}
+// Pressing on a list: with a mouse, wait for the pointer to move a few pixels; with a finger, wait for a press-and-hold
+// (so that a normal swipe still scrolls the page). Only starts if at least one folder exists.
+jobsEl.addEventListener("pointerdown", e => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  const a = e.target.closest("a[data-job]");
+  if (!a || !sortedFolders().length) return;
+  Object.assign(drag, { id: a.dataset.job, el: a, type: e.pointerType, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, active: false });
+  if (e.pointerType !== "mouse") drag.timer = setTimeout(startDrag, 350);
+});
+document.addEventListener("pointermove", e => {
+  if (!drag.id) return;
+  drag.lastX = e.clientX; drag.lastY = e.clientY;
+  if (drag.active) return;
+  const moved = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
+  if (drag.type === "mouse") { if (moved > 6) startDrag(); }
+  else if (moved > 10) finishDrag(false); // finger moved before the press-and-hold finished: they're scrolling, not dragging
+});
+document.addEventListener("pointerup", () => { if (drag.id) finishDrag(true); });
+document.addEventListener("pointercancel", () => { if (drag.id) finishDrag(false); });
+// While dragging with a finger, stop the page from scrolling along with it
+document.addEventListener("touchmove", e => { if (drag.active) e.preventDefault(); }, { passive: false });
+jobsEl.addEventListener("dragstart", e => e.preventDefault()); // turn off the browser's own link dragging
+jobsEl.addEventListener("contextmenu", e => { if (drag.id) e.preventDefault(); }); // no right-click / long-press menu on a list you're dragging
+// After a drag ends, browsers can send a click to the list you were holding, which would open it. Swallow that click.
+jobsEl.addEventListener("click", e => { if (Date.now() - dragEndedAt < 400) { e.preventDefault(); e.stopPropagation(); } }, true);
+
 // Copy text to the clipboard; if that's not allowed, show the text in a box so it can be selected and copied by hand
 function copyOut(text, okMsg) {
   const box = document.getElementById("copyBox"), ta = document.getElementById("copyText");
